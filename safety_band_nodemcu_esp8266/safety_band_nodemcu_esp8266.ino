@@ -1,83 +1,99 @@
 /*
- * Female Safety Band - LOLIN NodeMCU V3 (ESP8266) + NEO-6M (GY-GPS6MV2) + SIM800L
- * (no button, no buzzer - SOS is triggered remotely)
+ * Female Safety Band — Complete Hardware Firmware
+ * Hardware: LOLIN NodeMCU V3 (ESP8266) + GY-GPS6MV2 (NEO-6M) + SIM800L + Button + Buzzer
  *
- * Wiring (NodeMCU labels):
- *   GPS  TXD  -> D6          GPS VCC -> 3V3, GND -> GND  (GPS RXD not needed)
- *   SIM800L TXD -> D5        SIM800L RXD -> 2k resistor -> D7
- *   SIM800L VCC -> Li-ion cell 3.7-4.2V (+1000uF cap), GND common with NodeMCU
+ * Exact Wiring as per schematic:
+ *   GPS:
+ *     VCC -> NodeMCU 3V3
+ *     TXD -> NodeMCU D6 (GPIO12)
+ *     GND -> Common Ground
  *
- * Board: "NodeMCU 1.0 (ESP-12E Module)"   Library: TinyGPSPlus
+ *   SIM800L:
+ *     VCC -> Li-ion cell (3.7V - 4.2V) with 1000uF capacitor across VCC/GND
+ *     GND -> Common Ground (joined with NodeMCU GND & Li-ion negative)
+ *     TXD -> NodeMCU D5 (GPIO14)
+ *     RXD -> 1k resistor -> NodeMCU D7 (GPIO13)
+ *     Antenna attached
  *
- * HOW SOS IS TRIGGERED (any of these):
- *   1. SMS to the band's SIM from OWNER_NUMBER or a CONTACT:
- *        SOS   -> start SOS (SMS + call + server updates)
- *        STOP  -> cancel SOS
- *        LOC   -> reply once with current location
- *   2. The app/server: band polls COMMAND_URL over WiFi (phone hotspot)
- *        server answers {"command":"sos"} / {"command":"stop"} / {"command":"none"}
- *   3. Serial Monitor (115200): type sos / stop / loc   (bench testing)
+ *   SOS Button:
+ *     Leg 1 -> NodeMCU D1 (GPIO5)
+ *     Leg 2 -> Common Ground
  *
- * While SOS is active: SMS update every 60s, server POST every 10s (max 30 min).
- * LED: slow blink = no GPS fix, solid = GPS fix, fast blink = SOS active.
+ *   Buzzer:
+ *     +     -> NodeMCU D2 (GPIO4)
+ *     -     -> Common Ground
+ *
+ *   Power:
+ *     NodeMCU powered via USB
+ *     SIM800L powered via dedicated Li-ion battery (3.7V - 4.2V) + 1000uF cap
+ *
+ * Board in Arduino IDE: "NodeMCU 1.0 (ESP-12E Module)"
+ * Required Library: TinyGPSPlus
  */
 
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
-#include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 
-// ================= CONFIG =================
-const char* OWNER_NUMBER = "+919599891970";                      // her own phone (can send SOS/STOP/LOC)
-const char* CONTACTS[]   = {"+917248549516"};                   // emergency contacts (get alerts, can send commands)
+// ================= CONFIGURATION =================
+const char* OWNER_NUMBER = "+919599891970";       // Her phone number
+const char* CONTACTS[]   = {"+917248549516"};    // Emergency contact (gets SMS + Call)
 const int   NUM_CONTACTS = 1;
 
-const char* DEVICE_ID  = "band-001";
+const char* DEVICE_ID    = "band-001";
 
 // WiFi (phone hotspot or home router)
-// Set your WiFi / Phone Hotspot name & password so ESP8266 connects to the same network as your laptop
-const char* WIFI_SSID   = "Redmi Note 12 Pro+ 5G";
-const char* WIFI_PASS   = "Whatyoudo";
+const char* WIFI_SSID    = "Redmi Note 12 Pro+ 5G";
+const char* WIFI_PASS    = "Whatyoudo";
 
-// Production Cloud Server Endpoints (Render)
-const char* SERVER_URL  = "https://safety-system-yfxl.onrender.com/api/location";
-const char* COMMAND_URL = "https://safety-system-yfxl.onrender.com/api/device/band-001/command";
+// Cloud Backend Endpoints (Render)
+const char* SERVER_URL   = "https://safety-system-yfxl.onrender.com/api/location";
+const char* COMMAND_URL  = "https://safety-system-yfxl.onrender.com/api/device/band-001/command";
+const char* API_KEY      = "dev_device_api_key_12345";
 
-// API Key (must match DEVICE_API_KEY on the server / .env)
-const char* API_KEY     = "dev_device_api_key_12345";
-
-// ================= PINS ===================
-#define GPS_RX   D6   // NodeMCU RX <- GPS TXD
-#define GSM_RX   D5   // NodeMCU RX <- SIM800L TXD
-#define GSM_TX   D7   // NodeMCU TX -> SIM800L RXD (through resistor)
-#define LED_PIN  D4   // onboard LED (active LOW)
+// ================= PIN ASSIGNMENTS =================
+#define PIN_BUTTON D1   // SOS Button (Leg 1 -> D1, Leg 2 -> GND, INPUT_PULLUP)
+#define PIN_BUZZER D2   // Buzzer (+ -> D2, - -> GND)
+#define PIN_LED    D4   // Onboard NodeMCU LED (active LOW)
+#define PIN_GPS_RX D6   // GPS TXD -> D6
+#define PIN_GSM_RX D5   // SIM800L TXD -> D5
+#define PIN_GSM_TX D7   // NodeMCU D7 -> 1k resistor -> SIM800L RXD
 
 // ================= TIMING =================
-const uint32_t SMS_UPDATE_MS  = 60000;
-const uint32_t POST_UPDATE_MS = 10000;
-const uint32_t POLL_MS        = 5000;
-const uint32_t SOS_MAX_MS     = 30UL * 60UL * 1000UL;
+const uint32_t SMS_REPEAT_MS = 60000;             // Repeat SMS every 60s during SOS
+const uint32_t POST_UPDATE_MS = 10000;            // Cloud POST every 10s during SOS
+const uint32_t POLL_MS        = 5000;             // Poll cloud command queue every 5s
+const uint32_t SOS_MAX_MS     = 30UL * 60UL * 1000UL; // Auto-timeout SOS after 30 mins
 
+// ================= OBJECTS & GLOBALS =================
 TinyGPSPlus gps;
-SoftwareSerial gpsSerial(GPS_RX, -1);        // receive only
-SoftwareSerial gsmSerial(GSM_RX, GSM_TX);
-WiFiClient plainClient;
+SoftwareSerial gpsSerial(PIN_GPS_RX, -1);         // GPS: receive only on D6
+SoftwareSerial gsmSerial(PIN_GSM_RX, PIN_GSM_TX); // SIM800L: RX=D5, TX=D7
 WiFiClientSecure secureClient;
 
-bool     sosActive = false;
-uint32_t sosStart = 0, lastSms = 0, lastPost = 0, lastPoll = 0;
-double   lastLat = 0, lastLng = 0;
+bool     sosActive     = false;
+uint32_t sosStart      = 0;
+uint32_t lastSmsTime   = 0;
+uint32_t lastPostTime  = 0;
+uint32_t lastPollTime  = 0;
+uint32_t buttonDownAt  = 0;
+bool     buttonWasDown = false;
+
+double   lastLat = 28.622666;                     // Default fallback (Delhi)
+double   lastLng = 77.296663;
 bool     haveFix = false;
 
-String gsmLine, smsSender;
-bool   expectBody = false;
-String serialLine;
+String gsmBuffer, smsSender;
+bool   expectSmsBody = false;
+String serialBuffer;
 
-// ---------- GPS ----------
+// ---------- GPS FUNCTIONS ----------
 void feedGPS() {
-  while (gpsSerial.available()) gps.encode(gpsSerial.read());
+  while (gpsSerial.available()) {
+    gps.encode(gpsSerial.read());
+  }
   if (gps.location.isValid()) {
     lastLat = gps.location.lat();
     lastLng = gps.location.lng();
@@ -85,266 +101,486 @@ void feedGPS() {
   }
 }
 
-void waitMs(uint32_t ms) {            // delay that keeps feeding GPS
-  uint32_t t = millis();
-  while (millis() - t < ms) { feedGPS(); delay(5); }
-}
-
-String locationText() {
-  if (!haveFix) return "Location unavailable (no GPS fix yet).";
-  String s = gps.location.isValid() ? "Live location: " : "Last known location: ";
-  s += "https://maps.google.com/?q=" + String(lastLat, 6) + "," + String(lastLng, 6);
-  return s;
-}
-
-// ---------- LED ----------
-void ledBlink(int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(LED_PIN, LOW);  delay(150);
-    digitalWrite(LED_PIN, HIGH); delay(150);
-  }
-}
-
-// ---------- GSM ----------
-bool gsmWait(const char* expect, uint32_t timeout) {
-  String buf;
-  uint32_t t = millis();
-  while (millis() - t < timeout) {
-    while (gsmSerial.available()) buf += (char)gsmSerial.read();
-    if (buf.indexOf(expect) >= 0) return true;
+void waitWithGps(uint32_t ms) {
+  uint32_t start = millis();
+  while (millis() - start < ms) {
     feedGPS();
-    delay(10);
+    delay(5);
   }
-  Serial.println("GSM timeout, got: " + buf);
+}
+
+String getLocationUrl() {
+  String url = "https://maps.google.com/?q=" + String(lastLat, 6) + "," + String(lastLng, 6);
+  if (!haveFix) {
+    url += " (approximated)";
+  }
+  return url;
+}
+
+// ---------- BUZZER & LED ALARM ----------
+void updateAlarmHardware() {
+  if (sosActive) {
+    // SOS active: Fast flashing LED and pulsing alarm siren
+    bool pulse = (millis() / 200) % 2;
+    digitalWrite(PIN_LED, pulse ? LOW : HIGH);
+    digitalWrite(PIN_BUZZER, pulse ? HIGH : LOW);
+  } else {
+    // Normal mode: Buzzer silent
+    digitalWrite(PIN_BUZZER, LOW);
+
+    // LED status: solid if GPS fixed, slow blink if searching
+    if (gps.location.isValid()) {
+      digitalWrite(PIN_LED, LOW);
+    } else {
+      digitalWrite(PIN_LED, (millis() / 600) % 2 ? LOW : HIGH);
+    }
+  }
+}
+
+// ---------- SIM800L GSM FUNCTIONS ----------
+bool gsmWait(const char* expect, uint32_t timeoutMs) {
+  String buf;
+  uint32_t start = millis();
+  while (millis() - start < timeoutMs) {
+    while (gsmSerial.available()) {
+      char c = gsmSerial.read();
+      buf += c;
+      Serial.write(c);
+      if (buf.indexOf(expect) >= 0) return true;
+    }
+    feedGPS();
+    delay(5);
+  }
   return false;
 }
 
-bool gsmCmd(const String& cmd, const char* expect = "OK", uint32_t timeout = 2000) {
-  while (gsmSerial.available()) gsmSerial.read();   // flush
+bool gsmCommand(const String& cmd, const char* expect = "OK", uint32_t timeoutMs = 3000) {
+  while (gsmSerial.available()) gsmSerial.read(); // flush
+  Serial.print("\n[GSM CMD] ");
+  Serial.println(cmd);
   gsmSerial.print(cmd);
-  gsmSerial.print("\r");
-  return gsmWait(expect, timeout);
-}
-
-bool networkReady() {
-  while (gsmSerial.available()) gsmSerial.read();
-  gsmSerial.print("AT+CREG?\r");
-  String buf;
-  uint32_t t = millis();
-  while (millis() - t < 1500) {
-    while (gsmSerial.available()) buf += (char)gsmSerial.read();
-    feedGPS();
-    delay(10);
-  }
-  return buf.indexOf(",1") >= 0 || buf.indexOf(",5") >= 0;   // home or roaming
+  gsmSerial.print("\r\n");
+  return gsmWait(expect, timeoutMs);
 }
 
 bool gsmInit() {
-  waitMs(3000);
-  bool ok = false;
-  for (int i = 0; i < 10 && !ok; i++) ok = gsmCmd("AT");
-  if (!ok) return false;
-  gsmCmd("ATE0");                     // echo off
-  gsmCmd("AT+CMGF=1");                // SMS text mode
-  gsmCmd("AT+CSCS=\"GSM\"");
-  gsmCmd("AT+CNMI=2,2,0,0,0");        // deliver incoming SMS straight to serial (+CMT)
-  gsmCmd("AT+CMGD=1,4");              // delete old stored SMS
+  Serial.println("\n[GSM] Initializing SIM800L module...");
+  waitWithGps(2000);
+
+  // Sync baud rate
+  bool synced = false;
+  for (int i = 0; i < 5; i++) {
+    gsmSerial.print("AT\r\n");
+    if (gsmWait("OK", 1000)) { synced = true; break; }
+    delay(200);
+  }
+
+  if (!synced) {
+    Serial.println("[GSM ERROR] SIM800L not responding. Check Li-ion battery (3.7-4.2V), 1000uF cap, and D5/D7 wiring.");
+    return false;
+  }
+
+  gsmCommand("ATE0");                   // Echo off
+  gsmCommand("AT+CMGF=1");              // Set SMS to text mode
+  gsmCommand("AT+CSCS=\"GSM\"");        // GSM 7-bit alphabet
+  gsmCommand("AT+CNMI=2,2,0,0,0");      // Direct SMS delivery to serial
+  gsmCommand("AT+CPIN?");               // Check SIM card status
+  gsmCommand("AT+CSQ");                 // Check signal strength
+
+  Serial.println("[GSM] Waiting for cell tower network registration...");
+  for (int i = 0; i < 20; i++) {
+    while (gsmSerial.available()) gsmSerial.read();
+    gsmSerial.print("AT+CREG?\r\n");
+    String reg;
+    uint32_t t = millis();
+    while (millis() - t < 1000) {
+      while (gsmSerial.available()) reg += (char)gsmSerial.read();
+      delay(5);
+    }
+    if (reg.indexOf(",1") >= 0 || reg.indexOf(",5") >= 0) {
+      Serial.println("[GSM] SUCCESS: Registered on cellular network!");
+      return true;
+    }
+    feedGPS();
+    delay(500);
+  }
+
+  Serial.println("[GSM WARNING] Network registration not confirmed yet. Will still attempt SMS.");
   return true;
 }
 
-bool sendSMS(const String& number, const String& text) {
-  Serial.println("SMS -> " + number);
-  if (!gsmCmd("AT+CMGS=\"" + number + "\"", ">", 5000)) return false;
+// Robust SIM800L SMS Dispatch
+bool sendSmsSim800L(const String& phoneNumber, const String& text) {
+  Serial.println("\n==========================================");
+  Serial.printf("[SIM800L] SENDING EMERGENCY SMS TO: %s\n", phoneNumber.c_str());
+  Serial.println("==========================================");
+
+  // 1. Force Text Mode
+  gsmSerial.print("AT+CMGF=1\r\n");
+  waitWithGps(200);
+
+  // 2. Clear buffer
+  while (gsmSerial.available()) gsmSerial.read();
+
+  // 3. Send CMGS command
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(phoneNumber);
+  gsmSerial.print("\"\r\n");
+
+  // 4. Wait for '>' prompt from SIM800L
+  uint32_t start = millis();
+  bool gotPrompt = false;
+  while (millis() - start < 5000) {
+    feedGPS();
+    if (gsmSerial.available()) {
+      char c = gsmSerial.read();
+      Serial.write(c);
+      if (c == '>') {
+        gotPrompt = true;
+        break;
+      }
+    }
+    delay(5);
+  }
+
+  if (!gotPrompt) {
+    Serial.println("\n[SIM800L ERROR] No '>' prompt received! Aborting SMS.");
+    gsmSerial.write(27); // Send ESC to abort
+    return false;
+  }
+
+  // 5. Send message content
+  waitWithGps(100);
   gsmSerial.print(text);
-  gsmSerial.write(26);                // Ctrl+Z
-  return gsmWait("OK", 15000);
+  waitWithGps(200);
+
+  // 6. Send Ctrl+Z (ASCII 26) to commit and send
+  gsmSerial.write(26);
+
+  // 7. Wait for SIM800L to transmit to tower
+  start = millis();
+  String resp = "";
+  bool confirmed = false;
+  while (millis() - start < 20000) {
+    feedGPS();
+    if (gsmSerial.available()) {
+      char c = gsmSerial.read();
+      resp += c;
+      Serial.write(c);
+      if (resp.indexOf("OK") >= 0 || resp.indexOf("+CMGS:") >= 0) {
+        confirmed = true;
+        break;
+      }
+      if (resp.indexOf("ERROR") >= 0) {
+        confirmed = false;
+        break;
+      }
+    }
+    delay(5);
+  }
+
+  if (confirmed) {
+    Serial.println("\n[SIM800L] *** EMERGENCY SMS SUCCESSFULLY SENT! ***\n");
+  } else {
+    Serial.println("\n[SIM800L ERROR] SMS failed or tower timeout: " + resp);
+  }
+  return confirmed;
 }
 
-void makeCall(const String& number) {
-  Serial.println("CALL -> " + number);
-  gsmCmd("ATD" + number + ";", "OK", 5000);
-  waitMs(25000);                      // ring for ~25s
-  gsmCmd("ATH");                      // hang up
+// Make emergency voice call via SIM800L
+void makeCallSim800L(const String& phoneNumber) {
+  Serial.printf("\n[SIM800L] Calling emergency contact: %s\n", phoneNumber.c_str());
+  gsmCommand("ATD" + phoneNumber + ";", "OK", 5000);
+  waitWithGps(20000); // Let it ring for 20 seconds
+  gsmCommand("ATH", "OK", 2000); // Hang up
 }
 
-void smsAll(const String& header) {
-  String msg = header + "\n" + locationText();
-  for (int i = 0; i < NUM_CONTACTS; i++) sendSMS(CONTACTS[i], msg);
-  lastSms = millis();
+// Send SMS to all registered emergency contacts
+void sendEmergencySmsToAll(const String& customPrefix) {
+  String message = customPrefix + "\n" +
+                   "Sneha needs urgent help!\n" +
+                   "Live GPS: " + getLocationUrl();
+
+  for (int i = 0; i < NUM_CONTACTS; i++) {
+    sendSmsSim800L(CONTACTS[i], message);
+  }
+  lastSmsTime = millis();
 }
 
-// ---------- AUTHORISATION ----------
-String last10(const String& n) {
-  String d;
-  for (unsigned int i = 0; i < n.length(); i++) if (isdigit(n[i])) d += n[i];
-  return d.length() > 10 ? d.substring(d.length() - 10) : d;
-}
+// ---------- CLOUD SERVER (RENDER) ----------
+void postLocationToCloud(const char* eventType) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[CLOUD] WiFi not connected. Skipping server POST.");
+    return;
+  }
 
-bool isAuthorized(const String& number) {
-  String x = last10(number);
-  if (x.length() < 10) return false;
-  if (x == last10(OWNER_NUMBER)) return true;
-  for (int i = 0; i < NUM_CONTACTS; i++) if (x == last10(CONTACTS[i])) return true;
-  return false;
-}
-
-// ---------- SERVER ----------
-bool httpBegin(HTTPClient& http, const String& url) {
-  if (url.startsWith("https")) return http.begin(secureClient, url);
-  return http.begin(plainClient, url);
-}
-
-void postLocation(const char* event) {
-  if (strlen(SERVER_URL) == 0 || WiFi.status() != WL_CONNECTED) return;
   HTTPClient http;
-  if (!httpBegin(http, SERVER_URL)) return;
-  http.setTimeout(3000);
+  if (!http.begin(secureClient, SERVER_URL)) return;
+
+  http.setTimeout(4000);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("x-api-key", API_KEY);
-  String body = String("{\"deviceId\":\"") + DEVICE_ID +
-                "\",\"event\":\"" + event +
+
+  String json = String("{\"deviceId\":\"") + DEVICE_ID +
+                "\",\"event\":\"" + eventType +
                 "\",\"lat\":" + String(lastLat, 6) +
                 ",\"lng\":" + String(lastLng, 6) +
                 ",\"fix\":" + (haveFix ? "true" : "false") + "}";
-  int code = http.POST(body);
-  if (code > 0) {
-    Serial.printf("POST %s -> HTTP %d\n", event, code);
-  } else {
-    Serial.printf("POST %s failed: %s\n", event, http.errorToString(code).c_str());
-  }
+
+  int code = http.POST(json);
+  Serial.printf("[CLOUD] POST /api/location (%s) -> HTTP %d\n", eventType, code);
   http.end();
-  lastPost = millis();
-}
-
-// ---------- COMMANDS / SOS ----------
-void startSOS() {
-  sosActive = true;
-  sosStart = millis();  
-  ledBlink(3);
-  postLocation("sos_start");                   // fastest path first
-  smsAll("SOS! I need help. This is an emergency.");
-  makeCall(CONTACTS[0]);
-}
-
-void cancelSOS() {
-  sosActive = false;
-  ledBlink(1);
-  postLocation("sos_cancel");
-  smsAll("SOS cancelled. I am safe now.");
-}
-
-void runCommand(const String& cmd, const String& replyTo) {
-  Serial.println("CMD: " + cmd);
-  if (cmd == "SOS")       { if (!sosActive) startSOS(); }
-  else if (cmd == "STOP") { if (sosActive) cancelSOS(); }
-  else if (cmd == "LOC")  { if (replyTo.length() > 0) sendSMS(replyTo, locationText()); else Serial.println(locationText()); }
+  lastPostTime = millis();
 }
 
 void pollServerCommand() {
-  lastPoll = millis();
-  if (strlen(COMMAND_URL) == 0 || WiFi.status() != WL_CONNECTED) return;
+  lastPollTime = millis();
+  if (WiFi.status() != WL_CONNECTED) return;
+
   HTTPClient http;
-  if (!httpBegin(http, COMMAND_URL)) return;
+  if (!http.begin(secureClient, COMMAND_URL)) return;
+
   http.setTimeout(3000);
   http.addHeader("x-api-key", API_KEY);
   int code = http.GET();
   String payload = (code == 200) ? http.getString() : "";
-  if (code > 0) {
-    if (payload.length() > 0 && payload.indexOf("\"none\"") < 0) {
-      Serial.printf("POLL RECEIVED COMMAND: %s\n", payload.c_str());
+  http.end();
+
+  if (code == 200 && payload.indexOf("\"none\"") < 0) {
+    Serial.printf("[CLOUD] Received remote command: %s\n", payload.c_str());
+    if (payload.indexOf("\"sos\"") >= 0) {
+      triggerSOS("REMOTE APP COMMAND");
+    } else if (payload.indexOf("\"stop\"") >= 0) {
+      stopSOS("REMOTE APP COMMAND");
     }
-  } else {
-    Serial.printf("POLL failed: %s\n", http.errorToString(code).c_str());
   }
-  http.end();                                  // close connection before any long action
-  if (payload.indexOf("\"sos\"") >= 0)       runCommand("SOS", "");
-  else if (payload.indexOf("\"stop\"") >= 0) runCommand("STOP", "");
 }
 
-// ---------- INCOMING SMS ----------
-void handleGsmLine(String line) {
-  line.trim();
-  if (line.length() == 0) return;
-  if (line.startsWith("+CMT:")) {              // +CMT: "+91xxxxxxxxxx","","date"
-    int a = line.indexOf('"');
-    int b = line.indexOf('"', a + 1);
-    smsSender = (a >= 0 && b > a) ? line.substring(a + 1, b) : "";
-    expectBody = true;
-    return;
-  }
-  if (expectBody) {                            // next non-empty line is the SMS text
-    expectBody = false;
-    String cmd = line;
-    cmd.toUpperCase();
-    Serial.println("SMS from " + smsSender + ": " + cmd);
-    if (isAuthorized(smsSender)) runCommand(cmd, smsSender);
-    else Serial.println("Ignored: unauthorized sender");
-    return;
-  }
-  if (line == "RING") gsmSerial.print("ATH\r");  // reject incoming calls
+// ---------- SOS STATE MACHINE ----------
+void triggerSOS(const char* source) {
+  if (sosActive) return;
+
+  Serial.println("\n******************************************");
+  Serial.printf("!!! SOS TRIGGERED VIA: %s !!!\n", source);
+  Serial.println("******************************************");
+
+  sosActive = true;
+  sosStart  = millis();
+
+  // 1. Immediately turn on alarm buzzer & LED
+  digitalWrite(PIN_BUZZER, HIGH);
+  digitalWrite(PIN_LED, LOW);
+
+  // 2. PRIMARY: Send Emergency SMS via SIM800L
+  sendEmergencySmsToAll("EMERGENCY SOS ALERT!");
+
+  // 3. Make phone call via SIM800L
+  makeCallSim800L(CONTACTS[0]);
+
+  // 4. Update Cloud Dispatch Center on Render
+  postLocationToCloud("sos_start");
 }
 
-void readGsm() {
+void stopSOS(const char* source) {
+  if (!sosActive) return;
+
+  Serial.printf("\n[SOS] SOS Cancelled via: %s\n", source);
+  sosActive = false;
+
+  // Turn off buzzer
+  digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_LED, HIGH);
+
+  // Send cancellation SMS via SIM800L
+  for (int i = 0; i < NUM_CONTACTS; i++) {
+    sendSmsSim800L(CONTACTS[i], "SOS CANCELLED. Sneha is now safe.");
+  }
+
+  // Update cloud
+  postLocationToCloud("sos_cancel");
+}
+
+// ---------- INCOMING SMS COMMANDS ----------
+String getCleanNumber(const String& num) {
+  String digits = "";
+  for (unsigned int i = 0; i < num.length(); i++) {
+    if (isdigit(num[i])) digits += num[i];
+  }
+  return digits.length() >= 10 ? digits.substring(digits.length() - 10) : digits;
+}
+
+bool isAuthorizedNumber(const String& num) {
+  String clean = getCleanNumber(num);
+  if (clean.length() < 10) return false;
+  if (clean == getCleanNumber(OWNER_NUMBER)) return true;
+  for (int i = 0; i < NUM_CONTACTS; i++) {
+    if (clean == getCleanNumber(CONTACTS[i])) return true;
+  }
+  return false;
+}
+
+void handleIncomingSms(const String& line) {
+  String l = line;
+  l.trim();
+  if (l.length() == 0) return;
+
+  if (l.startsWith("+CMT:")) {
+    int firstQuote = l.indexOf('"');
+    int secondQuote = l.indexOf('"', firstQuote + 1);
+    smsSender = (firstQuote >= 0 && secondQuote > firstQuote) ? l.substring(firstQuote + 1, secondQuote) : "";
+    expectSmsBody = true;
+    return;
+  }
+
+  if (expectSmsBody) {
+    expectSmsBody = false;
+    l.toUpperCase();
+    Serial.println("\n[GSM] Received SMS from " + smsSender + ": " + l);
+
+    if (isAuthorizedNumber(smsSender)) {
+      if (l == "SOS") {
+        triggerSOS("INCOMING SMS");
+      } else if (l == "STOP") {
+        stopSOS("INCOMING SMS");
+      } else if (l == "LOC") {
+        sendSmsSim800L(smsSender, "Guardian Band Location: " + getLocationUrl());
+      }
+    } else {
+      Serial.println("[GSM] Ignored SMS from unauthorized sender.");
+    }
+  }
+}
+
+void readGsmStream() {
   while (gsmSerial.available()) {
     char c = gsmSerial.read();
-    if (c == '\n') { String l = gsmLine; gsmLine = ""; handleGsmLine(l); }
-    else if (c != '\r' && gsmLine.length() < 200) gsmLine += c;
+    if (c == '\n') {
+      String line = gsmBuffer;
+      gsmBuffer = "";
+      handleIncomingSms(line);
+    } else if (c != '\r' && gsmBuffer.length() < 200) {
+      gsmBuffer += c;
+    }
   }
 }
 
-void readSerialCommands() {                    // bench testing from Serial Monitor
+// Read test commands from USB Serial Monitor (115200 baud)
+void readSerialMonitorCommands() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
-      String cmd = serialLine; serialLine = "";
-      cmd.trim(); cmd.toUpperCase();
-      if (cmd.length() > 0) runCommand(cmd, "");
-    } else if (c != '\r') serialLine += c;
+      String cmd = serialBuffer;
+      serialBuffer = "";
+      cmd.trim();
+      cmd.toUpperCase();
+      if (cmd == "SOS") {
+        triggerSOS("SERIAL MONITOR");
+      } else if (cmd == "STOP") {
+        stopSOS("SERIAL MONITOR");
+      } else if (cmd == "LOC") {
+        Serial.println("Location: " + getLocationUrl());
+      } else if (cmd == "TEST") {
+        Serial.println("[TEST] Sending test SMS to " + String(CONTACTS[0]));
+        sendSmsSim800L(CONTACTS[0], "Test message from Guardian Band SIM800L!");
+      }
+    } else if (c != '\r') {
+      serialBuffer += c;
+    }
   }
 }
 
-// ---------- MAIN ----------
+// ---------- PHYSICAL SOS BUTTON (D1) ----------
+void handlePhysicalButton() {
+  int buttonState = digitalRead(PIN_BUTTON); // LOW when pressed, HIGH when released
+
+  if (buttonState == LOW) {
+    if (!buttonWasDown) {
+      buttonWasDown = true;
+      buttonDownAt = millis();
+    } else {
+      // Button held: If held for >150ms, trigger SOS!
+      if (!sosActive && (millis() - buttonDownAt >= 150)) {
+        triggerSOS("PHYSICAL BUTTON (D1)");
+      }
+      // If held for 3 seconds while SOS is active, cancel SOS
+      else if (sosActive && (millis() - buttonDownAt >= 3000)) {
+        stopSOS("PHYSICAL BUTTON 3S HOLD");
+      }
+    }
+  } else {
+    buttonWasDown = false;
+  }
+}
+
+// ================= SETUP & LOOP =================
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);                 // LED off (active LOW)
-  secureClient.setInsecure();                  // fine for testing; pin a certificate for production
+  delay(500);
+  Serial.println("\n\n==========================================");
+  Serial.println("   GUARDIAN SOS — FEMALE SAFETY BAND      ");
+  Serial.println("==========================================");
 
-  gpsSerial.begin(9600);
-  gsmSerial.begin(9600);
+  // Pin Modes
+  pinMode(PIN_BUTTON, INPUT_PULLUP); // D1: Button to GND
+  pinMode(PIN_BUZZER, OUTPUT);       // D2: Buzzer +
+  pinMode(PIN_LED, OUTPUT);          // D4: Onboard LED
 
-  if (strlen(WIFI_SSID) > 0) WiFi.begin(WIFI_SSID, WIFI_PASS);   // non-blocking
+  digitalWrite(PIN_BUZZER, LOW);     // Silence buzzer on boot
+  digitalWrite(PIN_LED, HIGH);       // Turn off LED
 
-  if (gsmInit()) {
-    Serial.println("GSM ready, waiting for network...");
-    for (int i = 0; i < 30; i++) {
-      if (networkReady()) { Serial.println("Network registered"); break; }
-      waitMs(1000);
-    }
-    ledBlink(1);
-  } else {
-    Serial.println("GSM NOT responding - check power/wiring");
-    ledBlink(5);
+  // Secure client for Render HTTPS
+  secureClient.setInsecure();
+
+  // UART Software Serials
+  gpsSerial.begin(9600);             // D6
+  gsmSerial.begin(9600);             // D5 / D7
+
+  // Connect to WiFi Hotspot in background
+  if (strlen(WIFI_SSID) > 0) {
+    Serial.printf("[WIFI] Connecting to '%s'...\n", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
   }
-  Serial.println("Type sos / stop / loc here to test.");
+
+  // Initialize SIM800L
+  gsmInit();
+
+  Serial.println("\n[SYSTEM READY]");
+  Serial.println("• Press the physical button on Pin D1 to trigger emergency SOS!");
+  Serial.println("• Type 'sos' in Serial Monitor to test emergency SMS & call.");
+  Serial.println("• Type 'test' to send a test SMS to emergency contact.");
+  Serial.println("==========================================\n");
 }
 
 void loop() {
   feedGPS();
-  readGsm();
-  readSerialCommands();
+  readGsmStream();
+  readSerialMonitorCommands();
+  handlePhysicalButton();
+  updateAlarmHardware();
 
-  // LED: fast blink = SOS, solid = GPS fix, slow blink = searching
-  if (sosActive)                   digitalWrite(LED_PIN, (millis() / 150) % 2);
-  else if (gps.location.isValid()) digitalWrite(LED_PIN, LOW);
-  else                             digitalWrite(LED_PIN, (millis() / 500) % 2);
-
-  if (millis() - lastPoll >= POLL_MS) pollServerCommand();
-
-  if (sosActive) {
-    if (millis() - sosStart > SOS_MAX_MS) { sosActive = false; return; }
-    if (millis() - lastPost >= POST_UPDATE_MS) postLocation("sos_update");
-    if (millis() - lastSms  >= SMS_UPDATE_MS && haveFix) smsAll("SOS update:");
+  // Poll cloud server command queue every 5s
+  if (millis() - lastPollTime >= POLL_MS) {
+    pollServerCommand();
   }
+
+  // When SOS is active, send periodic updates
+  if (sosActive) {
+    // Timeout safeguard after 30 minutes
+    if (millis() - sosStart > SOS_MAX_MS) {
+      stopSOS("TIMEOUT (30 MIN)");
+      return;
+    }
+
+    // Stream live location to cloud every 10s
+    if (millis() - lastPostTime >= POST_UPDATE_MS) {
+      postLocationToCloud("sos_update");
+    }
+
+    // Send repeat SMS update every 60s
+    if (millis() - lastSmsTime >= SMS_REPEAT_MS) {
+      sendEmergencySmsToAll("SOS UPDATE:");
+    }
+  }
+
   yield();
 }
