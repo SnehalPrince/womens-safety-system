@@ -36,12 +36,19 @@ const int   NUM_CONTACTS = 2;
 
 const char* DEVICE_ID  = "band-001";
 
-// Optional WiFi (phone hotspot) + server. Leave "" to disable.
-const char* WIFI_SSID   = "";
-const char* WIFI_PASS   = "";
-const char* SERVER_URL  = "";   // POST location,  e.g. "https://yourapp.onrender.com/api/location"
-const char* COMMAND_URL = "";   // GET command,    e.g. "https://yourapp.onrender.com/api/device/band-001/command"
-const char* API_KEY     = "CHANGE_ME";
+// WiFi (phone hotspot) + server configuration
+// For mobile hotspot: enter phone hotspot SSID and Password
+const char* WIFI_SSID   = "YOUR_PHONE_HOTSPOT";
+const char* WIFI_PASS   = "YOUR_HOTSPOT_PASSWORD";
+
+// Server Endpoints
+// Render Production: replace "safety-system" with your actual Render service name
+// Local Testing: use your PC's LAN IP e.g. "http://192.168.1.100:3000/api/location"
+const char* SERVER_URL  = "https://safety-system.onrender.com/api/location";
+const char* COMMAND_URL = "https://safety-system.onrender.com/api/device/band-001/command";
+
+// API Key (must match DEVICE_API_KEY on the server / .env)
+const char* API_KEY     = "dev_device_api_key_12345";
 
 // ================= PINS ===================
 #define GPS_RX   D6   // NodeMCU RX <- GPS TXD
@@ -202,7 +209,11 @@ void postLocation(const char* event) {
                 ",\"lng\":" + String(lastLng, 6) +
                 ",\"fix\":" + (haveFix ? "true" : "false") + "}";
   int code = http.POST(body);
-  Serial.printf("POST %s -> %d\n", event, code);
+  if (code > 0) {
+    Serial.printf("POST %s -> HTTP %d\n", event, code);
+  } else {
+    Serial.printf("POST %s failed: %s\n", event, http.errorToString(code).c_str());
+  }
   http.end();
   lastPost = millis();
 }
@@ -240,6 +251,13 @@ void pollServerCommand() {
   http.addHeader("x-api-key", API_KEY);
   int code = http.GET();
   String payload = (code == 200) ? http.getString() : "";
+  if (code > 0) {
+    if (payload.length() > 0 && payload.indexOf("\"none\"") < 0) {
+      Serial.printf("POLL RECEIVED COMMAND: %s\n", payload.c_str());
+    }
+  } else {
+    Serial.printf("POLL failed: %s\n", http.errorToString(code).c_str());
+  }
   http.end();                                  // close connection before any long action
   if (payload.indexOf("\"sos\"") >= 0)       runCommand("SOS", "");
   else if (payload.indexOf("\"stop\"") >= 0) runCommand("STOP", "");
