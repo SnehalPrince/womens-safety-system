@@ -1,0 +1,19 @@
+{
+  "name": "womens-safety-system",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build --prefix web && npm run build --prefix server",
+    "start": "npm run start --prefix server",
+    "dev": "npm run dev --prefix server",
+    "test": "npm run test --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

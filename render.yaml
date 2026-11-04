@@ -1,0 +1,33 @@
+databases:
+  - name: safety-db
+    databaseName: safety
+    user: safety_user
+    plan: free
+
+services:
+  - type: web
+    name: safety-system
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: safety-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEVICE_API_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: RETENTION_DAYS
+        value: "30"
+      - key: FEATURE_SMS_FALLBACK
+        value: "false"
+      - key: FEATURE_CALL_BRIDGE
+        value: "false"
