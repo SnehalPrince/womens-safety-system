@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Guardian SOS</string>
+    <string name="title_activity_main">Guardian SOS</string>
+    <string name="package_name">com.guardiansos.app</string>
+    <string name="custom_url_scheme">com.guardiansos.app</string>
+</resources>

@@ -38,8 +38,8 @@ const char* DEVICE_ID  = "band-001";
 
 // WiFi (phone hotspot or home router)
 // Set your WiFi / Phone Hotspot name & password so ESP8266 connects to the same network as your laptop
-const char* WIFI_SSID   = "YOUR_WIFI_OR_HOTSPOT_NAME";
-const char* WIFI_PASS   = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID   = "Redmi Note 12 Pro+ 5G";
+const char* WIFI_PASS   = "Whatyoudo";
 
 // Local Server Endpoints (Your Laptop Local IP: 10.182.192.138)
 const char* SERVER_URL  = "http://10.182.192.138:3000/api/location";

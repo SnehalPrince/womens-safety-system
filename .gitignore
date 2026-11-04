@@ -10,3 +10,8 @@ yarn-debug.log*
 yarn-error.log*
 coverage/
 .turbo/
+.gradle/
+**/android/.gradle/
+**/android/app/build/
+**/android/build/
+local.properties
