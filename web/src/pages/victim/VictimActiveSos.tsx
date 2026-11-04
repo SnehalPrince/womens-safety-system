@@ -5,7 +5,8 @@ import { api } from '../../api/client.js';
 import { wakeLock } from '../../utils/wakeLock.js';
 import { MapComponent, MapLocationPoint } from '../../components/MapComponent.js';
 import { ChatThread, ChatMessage } from '../../components/ChatThread.js';
-import { Phone, MessageSquare, CheckCircle, ShieldAlert } from 'lucide-react';
+import { Phone, MessageSquare, CheckCircle, ShieldAlert, Send } from 'lucide-react';
+import { sendDirectSmsToContacts } from '../../utils/directSms.js';
 
 interface VictimActiveSosProps {
   incidentId: number;
@@ -23,8 +24,47 @@ export const VictimActiveSos: React.FC<VictimActiveSosProps> = ({ incidentId, on
   const [isResolving, setIsResolving] = useState(false);
   const [lastPostedTime, setLastPostedTime] = useState<Date | null>(null);
 
+  const [smsStatus, setSmsStatus] = useState<{
+    attempted: boolean;
+    sending: boolean;
+    sent: string[];
+    failed: { phone: string; error: string }[];
+  }>({
+    attempted: false,
+    sending: false,
+    sent: [],
+    failed: [],
+  });
+  const autoSmsDispatchedRef = useRef(false);
+
   const watchIdRef = useRef<number | null>(null);
   const lastPostTimestampRef = useRef<number>(0);
+
+  // Auto-send direct SMS through phone cellular network
+  useEffect(() => {
+    if (autoSmsDispatchedRef.current || !contacts || contacts.length === 0) return;
+
+    const triggerAutoSms = async () => {
+      autoSmsDispatchedRef.current = true;
+      setSmsStatus((prev) => ({ ...prev, sending: true, attempted: true }));
+
+      const latest = locations.length > 0 ? locations[locations.length - 1] : null;
+      const mapsLink = latest
+        ? `https://maps.google.com/?q=${latest.lat},${latest.lng}`
+        : 'GPS locating...';
+      const body = `EMERGENCY SOS ALERT: I need immediate help! My live location: ${mapsLink}`;
+
+      const res = await sendDirectSmsToContacts(contacts, body);
+      setSmsStatus({
+        attempted: true,
+        sending: false,
+        sent: res.sent,
+        failed: res.failed,
+      });
+    };
+
+    triggerAutoSms();
+  }, [contacts, locations]);
 
   // 1. Keep Screen Awake via Wake Lock API
   useEffect(() => {
@@ -158,6 +198,23 @@ export const VictimActiveSos: React.FC<VictimActiveSosProps> = ({ incidentId, on
     }
   };
 
+  const handleManualDirectSms = async () => {
+    if (!contacts || contacts.length === 0) return;
+    setSmsStatus((prev) => ({ ...prev, sending: true }));
+    const latest = locations.length > 0 ? locations[locations.length - 1] : null;
+    const mapsLink = latest
+      ? `https://maps.google.com/?q=${latest.lat},${latest.lng}`
+      : 'GPS locating...';
+    const body = `EMERGENCY SOS ALERT: I need immediate help! My live location: ${mapsLink}`;
+    const res = await sendDirectSmsToContacts(contacts, body);
+    setSmsStatus({
+      attempted: true,
+      sending: false,
+      sent: res.sent,
+      failed: res.failed,
+    });
+  };
+
   // Generate fallback SMS URL for priority contacts
   const latestLoc = locations.length > 0 ? locations[locations.length - 1] : null;
   const mapsLink = latestLoc
@@ -197,6 +254,41 @@ export const VictimActiveSos: React.FC<VictimActiveSosProps> = ({ incidentId, on
         </p>
       </div>
 
+      {/* Automatic Cellular SMS Status Indicator */}
+      {smsStatus.sending && (
+        <div className="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-2xl flex items-center gap-2.5 text-xs text-blue-800 dark:text-blue-300 animate-pulse">
+          <MessageSquare className="w-4 h-4 flex-shrink-0 text-blue-600 dark:text-blue-400" />
+          <span>Dispatching automatic background SMS to emergency contacts...</span>
+        </div>
+      )}
+
+      {smsStatus.sent.length > 0 && (
+        <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-2xl flex items-center justify-between text-xs text-emerald-800 dark:text-emerald-300">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 flex-shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>Auto SMS sent directly to {smsStatus.sent.join(', ')}</span>
+          </div>
+          <button
+            onClick={handleManualDirectSms}
+            className="text-[11px] underline font-bold cursor-pointer hover:text-emerald-950 dark:hover:text-emerald-100"
+          >
+            Resend
+          </button>
+        </div>
+      )}
+
+      {smsStatus.failed.length > 0 && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-2xl flex items-center justify-between text-xs text-amber-800 dark:text-amber-300">
+          <span>SMS permission needed or failed for {smsStatus.failed.map((f) => f.phone).join(', ')}.</span>
+          <button
+            onClick={handleManualDirectSms}
+            className="text-[11px] font-bold underline cursor-pointer hover:text-amber-950 dark:hover:text-amber-100 ml-2"
+          >
+            Grant & Retry
+          </button>
+        </div>
+      )}
+
       {/* Emergency Actions: Call 112 & SMS Fallback */}
       <div className="grid grid-cols-2 gap-3">
         <a
@@ -211,8 +303,8 @@ export const VictimActiveSos: React.FC<VictimActiveSosProps> = ({ incidentId, on
           href={smsUrl}
           className="py-3.5 px-4 bg-slate-900 hover:bg-slate-800 text-white dark:bg-white dark:text-slate-900 rounded-2xl font-bold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95"
         >
-          <MessageSquare className="w-4 h-4 text-emerald-400" />
-          <span>SMS All Contacts</span>
+          <Send className="w-4 h-4 text-emerald-400" />
+          <span>Open SMS App</span>
         </a>
       </div>
 

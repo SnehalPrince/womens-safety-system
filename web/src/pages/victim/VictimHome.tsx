@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../api/client.js';
 import { SosProgressButton } from '../../components/SosProgressButton.js';
 import { Users, Watch, Settings, AlertTriangle, ShieldCheck, Info } from 'lucide-react';
+import { sendDirectSmsToContacts } from '../../utils/directSms.js';
 
 interface VictimHomeProps {
   onSosTriggered: (incidentId: number) => void;
@@ -44,6 +45,15 @@ export const VictimHome: React.FC<VictimHomeProps> = ({ onSosTriggered, onOpenSe
       accuracy = pos.coords.accuracy;
     } catch (gpsErr) {
       console.warn('GPS location unavailable, using baseline location:', gpsErr);
+    }
+
+    // Immediately dispatch background emergency SMS to all contacts without leaving app
+    if (contacts && contacts.length > 0) {
+      const mapsLink = `https://maps.google.com/?q=${lat},${lng}`;
+      const smsMessage = `EMERGENCY ALERT: I triggered an SOS alert! My live location: ${mapsLink}`;
+      sendDirectSmsToContacts(contacts, smsMessage).catch((e) =>
+        console.warn('Direct SMS dispatch error:', e)
+      );
     }
 
     try {
