@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useAuth } from './AuthContext.js';
+import { getApiBaseUrl } from '../api/client.js';
 
 interface SocketContextType {
   socket: Socket | null;
@@ -27,7 +28,9 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return;
     }
 
-    const newSocket = io('/', {
+    const serverUrl = getApiBaseUrl() || window.location.origin;
+
+    const newSocket = io(serverUrl, {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,

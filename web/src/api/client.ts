@@ -3,6 +3,37 @@ export interface ApiError {
   details?: any;
 }
 
+export function getApiBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const custom = localStorage.getItem('custom_server_url');
+  if (custom) return custom.trim().replace(/\/$/, '');
+
+  // Vite development proxy
+  if (window.location.port === '5173') {
+    return 'http://localhost:3000';
+  }
+
+  // Running inside native Capacitor Android/iOS or file wrapper
+  const isNative =
+    (window as any).Capacitor?.isNativePlatform?.() ||
+    window.location.protocol === 'capacitor:' ||
+    (window.location.hostname === 'localhost' && window.location.port === '');
+
+  if (isNative) {
+    return 'http://10.182.192.138:3000';
+  }
+
+  return '';
+}
+
+export function setApiBaseUrl(url: string): void {
+  if (!url || !url.trim()) {
+    localStorage.removeItem('custom_server_url');
+  } else {
+    localStorage.setItem('custom_server_url', url.trim().replace(/\/$/, ''));
+  }
+}
+
 class ApiClient {
   private getAuthHeader(): Record<string, string> {
     const token = localStorage.getItem('token');
@@ -16,8 +47,13 @@ class ApiClient {
       ...options.headers,
     };
 
+    const baseUrl = getApiBaseUrl();
+    const targetUrl = path.startsWith('http')
+      ? path
+      : `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+
     try {
-      const response = await fetch(path, {
+      const response = await fetch(targetUrl, {
         ...options,
         headers,
       });
