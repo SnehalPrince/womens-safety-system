@@ -27,9 +27,9 @@ async function bootstrap() {
     initSocketIO(server, process.env.CORS_ORIGIN);
     console.log('[SOCKET] Socket.IO server initialized');
 
-    // 5. Start listening
-    server.listen(port, () => {
-      console.log(`[SERVER] Personal Safety System server listening on port ${port}`);
+    // 5. Start listening on all network interfaces
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`[SERVER] Personal Safety System server listening on http://0.0.0.0:${port}`);
     });
 
     // Graceful shutdown

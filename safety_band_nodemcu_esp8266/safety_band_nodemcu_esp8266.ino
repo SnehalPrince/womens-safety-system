@@ -30,22 +30,20 @@
 #include <WiFiClientSecure.h>
 
 // ================= CONFIG =================
-const char* OWNER_NUMBER = "+91ZZZZZZZZZZ";                      // her own phone (can send SOS/STOP/LOC)
-const char* CONTACTS[]   = {"+91XXXXXXXXXX", "+91YYYYYYYYYY"};  // emergency contacts (get alerts, can send commands)
-const int   NUM_CONTACTS = 2;
+const char* OWNER_NUMBER = "+919599891970";                      // her own phone (can send SOS/STOP/LOC)
+const char* CONTACTS[]   = {"+917248549516"};                   // emergency contacts (get alerts, can send commands)
+const int   NUM_CONTACTS = 1;
 
 const char* DEVICE_ID  = "band-001";
 
-// WiFi (phone hotspot) + server configuration
-// For mobile hotspot: enter phone hotspot SSID and Password
-const char* WIFI_SSID   = "YOUR_PHONE_HOTSPOT";
-const char* WIFI_PASS   = "YOUR_HOTSPOT_PASSWORD";
+// WiFi (phone hotspot or home router)
+// Set your WiFi / Phone Hotspot name & password so ESP8266 connects to the same network as your laptop
+const char* WIFI_SSID   = "YOUR_WIFI_OR_HOTSPOT_NAME";
+const char* WIFI_PASS   = "YOUR_WIFI_PASSWORD";
 
-// Server Endpoints
-// Render Production: replace "safety-system" with your actual Render service name
-// Local Testing: use your PC's LAN IP e.g. "http://192.168.1.100:3000/api/location"
-const char* SERVER_URL  = "https://safety-system.onrender.com/api/location";
-const char* COMMAND_URL = "https://safety-system.onrender.com/api/device/band-001/command";
+// Local Server Endpoints (Your Laptop Local IP: 10.182.192.138)
+const char* SERVER_URL  = "http://10.182.192.138:3000/api/location";
+const char* COMMAND_URL = "http://10.182.192.138:3000/api/device/band-001/command";
 
 // API Key (must match DEVICE_API_KEY on the server / .env)
 const char* API_KEY     = "dev_device_api_key_12345";
