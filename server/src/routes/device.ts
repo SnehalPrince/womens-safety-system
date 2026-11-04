@@ -157,3 +157,39 @@ deviceRouter.get('/device/:deviceId/command', async (req: Request, res: Response
   res.setHeader('Content-Type', 'application/json');
   res.status(200).send(JSON.stringify({ command }));
 });
+
+// GET /api/device/:deviceId/config (Band dynamically fetches victim profile & emergency contacts)
+deviceRouter.get('/device/:deviceId/config', async (req: Request, res: Response): Promise<void> => {
+  const { deviceId } = req.params;
+
+  const deviceRes = await query(
+    `SELECT d.device_id, d.user_id, u.name, u.phone 
+     FROM devices d 
+     LEFT JOIN users u ON d.user_id = u.id 
+     WHERE d.device_id = $1`,
+    [deviceId]
+  );
+
+  if (deviceRes.rows.length === 0) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  const row = deviceRes.rows[0];
+  let contactsList: string[] = [];
+
+  if (row.user_id) {
+    const contactsRes = await query(
+      `SELECT phone FROM contacts WHERE user_id = $1 ORDER BY priority ASC, id ASC LIMIT 5`,
+      [row.user_id]
+    );
+    contactsList = contactsRes.rows.map((r: { phone: string }) => r.phone);
+  }
+
+  res.status(200).json({
+    deviceId,
+    victimName: row.name || 'Guardian User',
+    victimPhone: row.phone || '',
+    contacts: contactsList,
+  });
+});

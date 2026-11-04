@@ -1,14 +1,20 @@
 /*
- * Female Safety Band — NodeMCU V3 (ESP8266) + NEO-6M GPS + SIM800L GSM
- * (No physical button, no buzzer — SOS is triggered via Mobile App, SMS, or Serial)
+ * Female Safety Band — NodeMCU V3 (ESP8266) + NEO-6M GPS + SIM800L GSM/GPRS
  *
- * Exact Wiring:
+ * 100% CELLULAR STANDALONE (NO WiFi, NO hardcoded victim numbers):
+ *   • NO WiFi needed — runs anywhere on cell towers using the SIM card.
+ *   • NO hardcoded phone numbers — configured dynamically via SMS ("SET <phone>")
+ *     or via SIM800L GPRS mobile internet, and saved permanently in EEPROM.
+ *   • SIM800L GPRS Mobile Data connects directly to the cloud backend.
+ *   • Emergency SMS + Phone Call sent directly via SIM800L over the cellular network.
+ *
+ * Wiring (NodeMCU labels):
  *   GPS (GY-GPS6MV2 / NEO-6M):
  *     VCC -> NodeMCU 3V3
  *     TXD -> NodeMCU D6 (GPIO12)
  *     GND -> Common Ground
  *
- *   SIM800L GSM Module:
+ *   SIM800L GSM/GPRS Module:
  *     VCC -> External Li-ion cell (3.7V - 4.2V) with 1000uF capacitor across VCC/GND
  *     GND -> Common Ground (joined with NodeMCU GND & Li-ion negative)
  *     TXD -> NodeMCU D5 (GPIO14)
@@ -16,33 +22,28 @@
  *     Antenna connected
  *
  *   NodeMCU V3:
- *     Powered via USB
+ *     Powered via USB (or 5V power bank)
  *
- * Board in Arduino IDE: "NodeMCU 1.0 (ESP-12E Module)"
+ * Board: "NodeMCU 1.0 (ESP-12E Module)" in Arduino IDE
  * Required Library: TinyGPSPlus
  */
 
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
-#include <WiFiClientSecure.h>
+#include <EEPROM.h>
 
 // ================= CONFIGURATION =================
-const char* OWNER_NUMBER = "+919599891970";       // Her phone number
-const char* CONTACTS[]   = {"+917248549516"};    // Emergency contact (gets SMS + Call)
-const int   NUM_CONTACTS = 1;
+const char* DEVICE_ID   = "band-001";
+const char* API_KEY     = "dev_device_api_key_12345";
 
-const char* DEVICE_ID    = "band-001";
+// Cellular APN (Auto-configures GPRS data for Indian SIM carriers)
+// Airtel: "airtelgprs.com" | Vi / Vodafone / Idea: "www" or "portalnmms" | BSNL: "bsnlnet" | Jio: "jionet"
+const char* GPRS_APN    = "airtelgprs.com"; 
 
-// WiFi (phone hotspot or home router)
-const char* WIFI_SSID    = "Redmi Note 12 Pro+ 5G";
-const char* WIFI_PASS    = "Whatyoudo";
-
-// Cloud Backend Endpoints (Render)
-const char* SERVER_URL   = "https://safety-system-yfxl.onrender.com/api/location";
-const char* COMMAND_URL  = "https://safety-system-yfxl.onrender.com/api/device/band-001/command";
-const char* API_KEY      = "dev_device_api_key_12345";
+// Cloud Server Endpoints (Render)
+const char* SERVER_URL  = "https://safety-system-yfxl.onrender.com/api/location";
+const char* COMMAND_URL = "https://safety-system-yfxl.onrender.com/api/device/band-001/command";
+const char* CONFIG_URL  = "https://safety-system-yfxl.onrender.com/api/device/band-001/config";
 
 // ================= PIN ASSIGNMENTS =================
 #define PIN_LED    D4   // Onboard NodeMCU LED (active LOW)
@@ -51,22 +52,32 @@ const char* API_KEY      = "dev_device_api_key_12345";
 #define PIN_GSM_TX D7   // NodeMCU D7 -> 1k resistor -> SIM800L RXD
 
 // ================= TIMING =================
-const uint32_t SMS_REPEAT_MS  = 60000;            // Repeat SMS every 60s during active SOS
-const uint32_t POST_UPDATE_MS = 10000;            // Cloud POST every 10s during active SOS
-const uint32_t POLL_MS        = 5000;             // Poll cloud command queue every 5s
-const uint32_t SOS_MAX_MS     = 30UL * 60UL * 1000UL; // Auto-timeout SOS after 30 mins
+const uint32_t SMS_REPEAT_MS   = 60000;            // Repeat SMS every 60s during active SOS
+const uint32_t GPRS_POST_MS    = 15000;            // GPRS telemetry every 15s during SOS
+const uint32_t GPRS_POLL_MS    = 10000;            // GPRS poll server command every 10s
+const uint32_t SOS_MAX_MS      = 30UL * 60UL * 1000UL; // Auto-timeout SOS after 30 mins
+
+// ================= EEPROM CONFIG STORAGE =================
+// Dynamic configuration stored in non-volatile flash (no hardcoded victim numbers)
+struct StoredConfig {
+  char magic[4];          // "GSOS"
+  char emergencyContact[24]; // e.g. "+917248549516"
+  char victimName[32];       // e.g. "Sneha"
+};
+
+StoredConfig config;
 
 // ================= OBJECTS & GLOBALS =================
 TinyGPSPlus gps;
 SoftwareSerial gpsSerial(PIN_GPS_RX, -1);         // GPS: receive only on D6
 SoftwareSerial gsmSerial(PIN_GSM_RX, PIN_GSM_TX); // SIM800L: RX=D5, TX=D7
-WiFiClientSecure secureClient;
 
-bool     sosActive    = false;
-uint32_t sosStart     = 0;
-uint32_t lastSmsTime  = 0;
-uint32_t lastPostTime = 0;
-uint32_t lastPollTime = 0;
+bool     sosActive     = false;
+uint32_t sosStart      = 0;
+uint32_t lastSmsTime   = 0;
+uint32_t lastPostTime  = 0;
+uint32_t lastPollTime  = 0;
+bool     gprsAttached  = false;
 
 double   lastLat = 28.622666;                     // Default fallback (Delhi)
 double   lastLng = 77.296663;
@@ -75,6 +86,44 @@ bool     haveFix = false;
 String gsmBuffer, smsSender;
 bool   expectSmsBody = false;
 String serialBuffer;
+
+// ---------- EEPROM STORAGE ----------
+void loadConfig() {
+  EEPROM.begin(512);
+  EEPROM.get(0, config);
+  if (strncmp(config.magic, "GSOS", 4) != 0) {
+    Serial.println("[CONFIG] No saved contact found in EEPROM. Initializing defaults.");
+    strncpy(config.magic, "GSOS", 4);
+    memset(config.emergencyContact, 0, sizeof(config.emergencyContact));
+    strncpy(config.victimName, "Guardian User", sizeof(config.victimName));
+    saveConfig();
+  } else {
+    Serial.printf("[CONFIG] Loaded saved Emergency Contact: '%s' (Victim: %s)\n",
+                  config.emergencyContact, config.victimName);
+  }
+}
+
+void saveConfig() {
+  EEPROM.put(0, config);
+  EEPROM.commit();
+  Serial.printf("[CONFIG] Saved Emergency Contact to EEPROM: %s\n", config.emergencyContact);
+}
+
+void setEmergencyContact(const String& number, const String& name = "") {
+  String clean = "";
+  for (unsigned int i = 0; i < number.length(); i++) {
+    char c = number[i];
+    if (isdigit(c) || c == '+') clean += c;
+  }
+  if (clean.length() >= 10) {
+    strncpy(config.emergencyContact, clean.c_str(), sizeof(config.emergencyContact) - 1);
+    config.emergencyContact[sizeof(config.emergencyContact) - 1] = '\0';
+    if (name.length() > 0) {
+      strncpy(config.victimName, name.c_str(), sizeof(config.victimName) - 1);
+    }
+    saveConfig();
+  }
+}
 
 // ---------- GPS FUNCTIONS ----------
 void feedGPS() {
@@ -99,7 +148,7 @@ void waitWithGps(uint32_t ms) {
 String getLocationUrl() {
   String url = "https://maps.google.com/?q=" + String(lastLat, 6) + "," + String(lastLng, 6);
   if (!haveFix) {
-    url += " (GPS acquiring...)";
+    url += " (approximated)";
   }
   return url;
 }
@@ -118,7 +167,7 @@ void updateLedStatus() {
   }
 }
 
-// ---------- SIM800L GSM FUNCTIONS ----------
+// ---------- SIM800L LOW-LEVEL AT COMMANDS ----------
 bool gsmWait(const char* expect, uint32_t timeoutMs) {
   String buf;
   uint32_t start = millis();
@@ -144,6 +193,119 @@ bool gsmCommand(const String& cmd, const char* expect = "OK", uint32_t timeoutMs
   return gsmWait(expect, timeoutMs);
 }
 
+// ---------- SIM800L GPRS CELLULAR INTERNET ----------
+bool initGPRS() {
+  Serial.println("\n[GPRS] Attaching to GPRS Mobile Internet...");
+  gsmCommand("AT+SAPBR=3,1,\"Contype\",\"GPRS\"");
+  gsmCommand(String("AT+SAPBR=3,1,\"APN\",\"") + GPRS_APN + "\"");
+  
+  // Close any existing bearer
+  gsmCommand("AT+SAPBR=0,1", "OK", 2000);
+  
+  // Open GPRS bearer
+  if (gsmCommand("AT+SAPBR=1,1", "OK", 10000)) {
+    Serial.println("[GPRS] SUCCESS: GPRS Bearer opened!");
+    gsmCommand("AT+SAPBR=2,1"); // Query IP address
+    gprsAttached = true;
+    return true;
+  } else {
+    Serial.println("[GPRS WARNING] GPRS attachment failed. SMS/Calling will still function 100%!");
+    gprsAttached = false;
+    return false;
+  }
+}
+
+// Send HTTP POST over SIM800L GPRS data
+void sendGprsLocationPost(const char* eventType) {
+  if (!gprsAttached) return;
+
+  Serial.println("\n[GPRS] Sending location update to Cloud via Mobile Data...");
+  gsmCommand("AT+HTTPINIT");
+  gsmCommand("AT+HTTPSSL=1"); // Enable SSL for HTTPS
+  gsmCommand("AT+HTTPPARA=\"CID\",1");
+  gsmCommand(String("AT+HTTPPARA=\"URL\",\"") + SERVER_URL + "\"");
+  gsmCommand("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  gsmCommand(String("AT+HTTPPARA=\"USERDATA\",\"x-api-key: ") + API_KEY + "\"");
+
+  String json = String("{\"deviceId\":\"") + DEVICE_ID +
+                "\",\"event\":\"" + eventType +
+                "\",\"lat\":" + String(lastLat, 6) +
+                ",\"lng\":" + String(lastLng, 6) +
+                ",\"fix\":" + (haveFix ? "true" : "false") + "}";
+
+  gsmCommand(String("AT+HTTPDATA=") + json.length() + ",5000", "DOWNLOAD", 3000);
+  gsmSerial.print(json);
+  waitWithGps(500);
+
+  gsmCommand("AT+HTTPACTION=1", "ACTION: 1", 10000); // 1 = POST
+  gsmCommand("AT+HTTPTERM");
+  lastPostTime = millis();
+}
+
+// Poll cloud commands over GPRS
+void pollGprsServerCommand() {
+  lastPollTime = millis();
+  if (!gprsAttached) return;
+
+  gsmCommand("AT+HTTPINIT");
+  gsmCommand("AT+HTTPSSL=1");
+  gsmCommand("AT+HTTPPARA=\"CID\",1");
+  gsmCommand(String("AT+HTTPPARA=\"URL\",\"") + COMMAND_URL + "\"");
+  gsmCommand(String("AT+HTTPPARA=\"USERDATA\",\"x-api-key: ") + API_KEY + "\"");
+
+  if (gsmCommand("AT+HTTPACTION=0", "ACTION: 0", 10000)) { // 0 = GET
+    while (gsmSerial.available()) gsmSerial.read();
+    gsmSerial.print("AT+HTTPREAD\r\n");
+    String resp;
+    uint32_t t = millis();
+    while (millis() - t < 3000) {
+      while (gsmSerial.available()) resp += (char)gsmSerial.read();
+      delay(5);
+    }
+    if (resp.indexOf("\"sos\"") >= 0) {
+      triggerSOS("GPRS CLOUD DISPATCH");
+    } else if (resp.indexOf("\"stop\"") >= 0) {
+      stopSOS("GPRS CLOUD DISPATCH");
+    }
+  }
+  gsmCommand("AT+HTTPTERM");
+}
+
+// Fetch dynamic victim profile & contacts from cloud over GPRS
+void fetchDynamicConfigOverGprs() {
+  if (!gprsAttached) return;
+
+  Serial.println("[GPRS] Checking dynamic victim configuration from cloud...");
+  gsmCommand("AT+HTTPINIT");
+  gsmCommand("AT+HTTPSSL=1");
+  gsmCommand("AT+HTTPPARA=\"CID\",1");
+  gsmCommand(String("AT+HTTPPARA=\"URL\",\"") + CONFIG_URL + "\"");
+  gsmCommand(String("AT+HTTPPARA=\"USERDATA\",\"x-api-key: ") + API_KEY + "\"");
+
+  if (gsmCommand("AT+HTTPACTION=0", "ACTION: 0", 10000)) {
+    while (gsmSerial.available()) gsmSerial.read();
+    gsmSerial.print("AT+HTTPREAD\r\n");
+    String resp;
+    uint32_t t = millis();
+    while (millis() - t < 3000) {
+      while (gsmSerial.available()) resp += (char)gsmSerial.read();
+      delay(5);
+    }
+    // Parse first contact from JSON: "contacts":["+91..."]
+    int contactStart = resp.indexOf("\"contacts\":[\"");
+    if (contactStart >= 0) {
+      int quote1 = contactStart + 13;
+      int quote2 = resp.indexOf("\"", quote1);
+      if (quote2 > quote1) {
+        String num = resp.substring(quote1, quote2);
+        setEmergencyContact(num);
+      }
+    }
+  }
+  gsmCommand("AT+HTTPTERM");
+}
+
+// ---------- SIM800L SMS & CALL FUNCTIONS ----------
 bool gsmInit() {
   Serial.println("\n[GSM] Initializing SIM800L module...");
   waitWithGps(2000);
@@ -192,6 +354,12 @@ bool gsmInit() {
 
 // Send SMS directly via SIM800L
 bool sendSmsSim800L(const String& phoneNumber, const String& text) {
+  if (phoneNumber.length() < 10) {
+    Serial.println("[SIM800L ERROR] Cannot send SMS: No emergency contact configured!");
+    Serial.println("[SIM800L] Send an SMS with 'SET +91XXXXXXXXXX' to set the emergency contact.");
+    return false;
+  }
+
   Serial.println("\n==========================================");
   Serial.printf("[SIM800L] SENDING EMERGENCY SMS TO: %s\n", phoneNumber.c_str());
   Serial.println("==========================================");
@@ -270,71 +438,21 @@ bool sendSmsSim800L(const String& phoneNumber, const String& text) {
 
 // Make emergency voice call via SIM800L
 void makeCallSim800L(const String& phoneNumber) {
+  if (phoneNumber.length() < 10) return;
   Serial.printf("\n[SIM800L] Calling emergency contact: %s\n", phoneNumber.c_str());
   gsmCommand("ATD" + phoneNumber + ";", "OK", 5000);
   waitWithGps(20000); // Ring for 20 seconds
   gsmCommand("ATH", "OK", 2000); // Hang up
 }
 
-// Send emergency SMS to all configured contacts
-void sendEmergencySmsToAll(const String& customPrefix) {
+// Send emergency SMS to saved emergency contact
+void sendEmergencySmsToContact(const String& customPrefix) {
   String message = customPrefix + "\n" +
-                   "Sneha needs urgent help!\n" +
+                   String(config.victimName) + " needs urgent help!\n" +
                    "Live GPS: " + getLocationUrl();
 
-  for (int i = 0; i < NUM_CONTACTS; i++) {
-    sendSmsSim800L(CONTACTS[i], message);
-  }
+  sendSmsSim800L(String(config.emergencyContact), message);
   lastSmsTime = millis();
-}
-
-// ---------- CLOUD SERVER (RENDER) ----------
-void postLocationToCloud(const char* eventType) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[CLOUD] WiFi not connected. Skipping server POST.");
-    return;
-  }
-
-  HTTPClient http;
-  if (!http.begin(secureClient, SERVER_URL)) return;
-
-  http.setTimeout(4000);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("x-api-key", API_KEY);
-
-  String json = String("{\"deviceId\":\"") + DEVICE_ID +
-                "\",\"event\":\"" + eventType +
-                "\",\"lat\":" + String(lastLat, 6) +
-                ",\"lng\":" + String(lastLng, 6) +
-                ",\"fix\":" + (haveFix ? "true" : "false") + "}";
-
-  int code = http.POST(json);
-  Serial.printf("[CLOUD] POST /api/location (%s) -> HTTP %d\n", eventType, code);
-  http.end();
-  lastPostTime = millis();
-}
-
-void pollServerCommand() {
-  lastPollTime = millis();
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  if (!http.begin(secureClient, COMMAND_URL)) return;
-
-  http.setTimeout(3000);
-  http.addHeader("x-api-key", API_KEY);
-  int code = http.GET();
-  String payload = (code == 200) ? http.getString() : "";
-  http.end();
-
-  if (code == 200 && payload.indexOf("\"none\"") < 0) {
-    Serial.printf("[CLOUD] Received remote command from App: %s\n", payload.c_str());
-    if (payload.indexOf("\"sos\"") >= 0) {
-      triggerSOS("MOBILE APP (SOS BUTTON)");
-    } else if (payload.indexOf("\"stop\"") >= 0) {
-      stopSOS("MOBILE APP (RESOLVED)");
-    }
-  }
 }
 
 // ---------- SOS STATE MACHINE ----------
@@ -348,14 +466,14 @@ void triggerSOS(const char* source) {
   sosActive = true;
   sosStart  = millis();
 
-  // 1. PRIMARY: Dispatch Emergency SMS via SIM800L module
-  sendEmergencySmsToAll("EMERGENCY SOS ALERT!");
+  // 1. PRIMARY: Dispatch Emergency SMS via SIM800L
+  sendEmergencySmsToContact("EMERGENCY SOS ALERT!");
 
-  // 2. Make Emergency Call via SIM800L module
-  makeCallSim800L(CONTACTS[0]);
+  // 2. Make Emergency Voice Call via SIM800L
+  makeCallSim800L(String(config.emergencyContact));
 
-  // 3. Update Cloud Dispatch Center on Render
-  postLocationToCloud("sos_start");
+  // 3. Send GPRS Telemetry to Cloud (if attached)
+  sendGprsLocationPost("sos_start");
 }
 
 void stopSOS(const char* source) {
@@ -365,33 +483,14 @@ void stopSOS(const char* source) {
   sosActive = false;
 
   // Send cancellation SMS via SIM800L
-  for (int i = 0; i < NUM_CONTACTS; i++) {
-    sendSmsSim800L(CONTACTS[i], "SOS CANCELLED. Sneha is now safe.");
+  if (strlen(config.emergencyContact) >= 10) {
+    sendSmsSim800L(String(config.emergencyContact), "SOS CANCELLED. " + String(config.victimName) + " is safe.");
   }
 
-  // Update cloud
-  postLocationToCloud("sos_cancel");
+  sendGprsLocationPost("sos_cancel");
 }
 
 // ---------- INCOMING SMS COMMANDS ----------
-String getCleanNumber(const String& num) {
-  String digits = "";
-  for (unsigned int i = 0; i < num.length(); i++) {
-    if (isdigit(num[i])) digits += num[i];
-  }
-  return digits.length() >= 10 ? digits.substring(digits.length() - 10) : digits;
-}
-
-bool isAuthorizedNumber(const String& num) {
-  String clean = getCleanNumber(num);
-  if (clean.length() < 10) return false;
-  if (clean == getCleanNumber(OWNER_NUMBER)) return true;
-  for (int i = 0; i < NUM_CONTACTS; i++) {
-    if (clean == getCleanNumber(CONTACTS[i])) return true;
-  }
-  return false;
-}
-
 void handleIncomingSms(const String& line) {
   String l = line;
   l.trim();
@@ -407,19 +506,35 @@ void handleIncomingSms(const String& line) {
 
   if (expectSmsBody) {
     expectSmsBody = false;
-    l.toUpperCase();
-    Serial.println("\n[GSM] Received SMS from " + smsSender + ": " + l);
+    String cmd = l;
+    cmd.trim();
+    Serial.println("\n[GSM] Received SMS from " + smsSender + ": " + cmd);
 
-    if (isAuthorizedNumber(smsSender)) {
-      if (l == "SOS") {
-        triggerSOS("INCOMING SMS");
-      } else if (l == "STOP") {
-        stopSOS("INCOMING SMS");
-      } else if (l == "LOC") {
-        sendSmsSim800L(smsSender, "Guardian Band Location: " + getLocationUrl());
+    // Dynamic configuration via SMS: "SET +91XXXXXXXXXX"
+    if (cmd.startsWith("SET") || cmd.startsWith("set")) {
+      String newNum = cmd.substring(3);
+      newNum.trim();
+      setEmergencyContact(newNum);
+      sendSmsSim800L(smsSender, "Guardian Band: Emergency contact set to " + newNum);
+      return;
+    }
+
+    cmd.toUpperCase();
+    if (cmd == "SOS") {
+      // If no contact set yet, set sender as contact!
+      if (strlen(config.emergencyContact) < 10) {
+        setEmergencyContact(smsSender);
       }
-    } else {
-      Serial.println("[GSM] Ignored SMS from unauthorized sender.");
+      triggerSOS("INCOMING SMS");
+    } else if (cmd == "STOP") {
+      stopSOS("INCOMING SMS");
+    } else if (cmd == "LOC") {
+      sendSmsSim800L(smsSender, "Guardian Band Live Location: " + getLocationUrl());
+    } else if (cmd == "STATUS") {
+      String statusMsg = "Band Status:\nContact: " + String(config.emergencyContact) +
+                         "\nGPS: " + (haveFix ? "Fixed" : "Searching") +
+                         "\nGPRS: " + (gprsAttached ? "Online" : "Offline");
+      sendSmsSim800L(smsSender, statusMsg);
     }
   }
 }
@@ -437,7 +552,7 @@ void readGsmStream() {
   }
 }
 
-// Read test commands from USB Serial Monitor (115200 baud)
+// Serial Monitor testing (115200 baud)
 void readSerialMonitorCommands() {
   while (Serial.available()) {
     char c = Serial.read();
@@ -445,16 +560,29 @@ void readSerialMonitorCommands() {
       String cmd = serialBuffer;
       serialBuffer = "";
       cmd.trim();
-      cmd.toUpperCase();
-      if (cmd == "SOS") {
-        triggerSOS("SERIAL MONITOR");
-      } else if (cmd == "STOP") {
-        stopSOS("SERIAL MONITOR");
-      } else if (cmd == "LOC") {
-        Serial.println("Location: " + getLocationUrl());
-      } else if (cmd == "TEST") {
-        Serial.println("[TEST] Sending test SMS to " + String(CONTACTS[0]));
-        sendSmsSim800L(CONTACTS[0], "Test message from Guardian Band SIM800L!");
+      if (cmd.startsWith("set ") || cmd.startsWith("SET ")) {
+        String num = cmd.substring(4);
+        num.trim();
+        setEmergencyContact(num);
+      } else {
+        cmd.toUpperCase();
+        if (cmd == "SOS") {
+          triggerSOS("SERIAL MONITOR");
+        } else if (cmd == "STOP") {
+          stopSOS("SERIAL MONITOR");
+        } else if (cmd == "LOC") {
+          Serial.println("Location: " + getLocationUrl());
+        } else if (cmd == "TEST") {
+          Serial.println("[TEST] Sending test SMS to: " + String(config.emergencyContact));
+          sendSmsSim800L(String(config.emergencyContact), "Test message from Guardian Band SIM800L!");
+        } else if (cmd == "STATUS") {
+          Serial.println("\n--- BAND STATUS ---");
+          Serial.printf("Emergency Contact: %s\n", config.emergencyContact);
+          Serial.printf("Victim Name: %s\n", config.victimName);
+          Serial.printf("GPS Fixed: %s (%f, %f)\n", haveFix ? "YES" : "NO", lastLat, lastLng);
+          Serial.printf("GPRS Internet: %s\n", gprsAttached ? "ATTACHED" : "OFFLINE");
+          Serial.println("-------------------\n");
+        }
       }
     } else if (c != '\r') {
       serialBuffer += c;
@@ -468,33 +596,37 @@ void setup() {
   delay(500);
   Serial.println("\n\n==========================================");
   Serial.println("   GUARDIAN SOS — FEMALE SAFETY BAND      ");
-  Serial.println("   (ESP8266 + NEO-6M GPS + SIM800L GSM)   ");
+  Serial.println("   (100% CELLULAR: NO WiFi, NO HARDCODE)  ");
   Serial.println("==========================================");
 
-  // Pin Mode for Status LED
+  // Status LED
   pinMode(PIN_LED, OUTPUT);
-  digitalWrite(PIN_LED, HIGH); // Turn off initially
+  digitalWrite(PIN_LED, HIGH);
 
-  // Secure client for Render HTTPS
-  secureClient.setInsecure();
+  // Load dynamic configuration from non-volatile EEPROM
+  loadConfig();
 
   // UART Software Serials
-  gpsSerial.begin(9600);       // D6
-  gsmSerial.begin(9600);       // D5 / D7
+  gpsSerial.begin(9600);       // D6 (GPS)
+  gsmSerial.begin(9600);       // D5 / D7 (SIM800L)
 
-  // Connect to WiFi Hotspot in background
-  if (strlen(WIFI_SSID) > 0) {
-    Serial.printf("[WIFI] Connecting to '%s'...\n", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-  }
-
-  // Initialize SIM800L module
+  // Initialize SIM800L cellular radio
   gsmInit();
 
+  // Initialize SIM GPRS Mobile Internet
+  initGPRS();
+
+  // If GPRS is online, sync dynamic profile from cloud
+  if (gprsAttached) {
+    fetchDynamicConfigOverGprs();
+  }
+
   Serial.println("\n[SYSTEM READY]");
-  Serial.println("• SOS is triggered directly from your phone app (or text 'SOS' to this SIM)");
-  Serial.println("• Type 'sos' in Serial Monitor to test emergency SMS & call.");
-  Serial.println("• Type 'test' in Serial Monitor to send an instant test SMS.");
+  Serial.println("• To set emergency contact, send SMS to this SIM: 'SET +91XXXXXXXXXX'");
+  Serial.println("• Or in Serial Monitor, type: 'set +91XXXXXXXXXX'");
+  Serial.println("• Send 'SOS' via SMS to trigger emergency alert");
+  Serial.println("• Send 'LOC' to get instant live Google Maps location link");
+  Serial.println("• Type 'sos', 'test', or 'status' in Serial Monitor");
   Serial.println("==========================================\n");
 }
 
@@ -504,9 +636,9 @@ void loop() {
   readSerialMonitorCommands();
   updateLedStatus();
 
-  // Poll cloud server command queue every 5s
-  if (millis() - lastPollTime >= POLL_MS) {
-    pollServerCommand();
+  // Poll cloud server command queue over GPRS
+  if (gprsAttached && (millis() - lastPollTime >= GPRS_POLL_MS)) {
+    pollGprsServerCommand();
   }
 
   // When SOS is active, send periodic updates
@@ -517,14 +649,14 @@ void loop() {
       return;
     }
 
-    // Stream live location to cloud every 10s
-    if (millis() - lastPostTime >= POST_UPDATE_MS) {
-      postLocationToCloud("sos_update");
-    }
-
     // Send repeat SMS update every 60s
     if (millis() - lastSmsTime >= SMS_REPEAT_MS) {
-      sendEmergencySmsToAll("SOS UPDATE:");
+      sendEmergencySmsToContact("SOS UPDATE:");
+    }
+
+    // Stream live location via GPRS every 15s
+    if (gprsAttached && (millis() - lastPostTime >= GPRS_POST_MS)) {
+      sendGprsLocationPost("sos_update");
     }
   }
 

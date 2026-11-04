@@ -41,13 +41,45 @@ export const VictimAuth: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) =
             <Shield className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
-            {isRegister ? 'Create Safety Account' : 'Welcome to Guardian SOS'}
+            {isRegister ? 'Create Safety Account' : 'Sign In to Guardian SOS'}
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
             {isRegister
-              ? 'Register to pair your hardware band and add trusted contacts'
-              : 'Sign in to access your personal emergency response system'}
+              ? 'Register any mobile number to configure personal protection'
+              : 'Enter your registered phone number and password'}
           </p>
+        </div>
+
+        {/* Segmented Sign In / Register Tabs */}
+        <div className="flex bg-slate-100 dark:bg-slate-900/80 p-1 rounded-2xl mb-6">
+          <button
+            type="button"
+            onClick={() => {
+              setIsRegister(false);
+              setError(null);
+            }}
+            className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+              !isRegister
+                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            Sign In
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsRegister(true);
+              setError(null);
+            }}
+            className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+              isRegister
+                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                : 'text-slate-500 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            Create New Account
+          </button>
         </div>
 
         {/* Error Alert */}
