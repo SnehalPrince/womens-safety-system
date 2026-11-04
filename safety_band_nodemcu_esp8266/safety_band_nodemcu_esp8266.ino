@@ -41,9 +41,9 @@ const char* DEVICE_ID  = "band-001";
 const char* WIFI_SSID   = "Redmi Note 12 Pro+ 5G";
 const char* WIFI_PASS   = "Whatyoudo";
 
-// Local Server Endpoints (Your Laptop Local IP: 10.182.192.138)
-const char* SERVER_URL  = "http://10.182.192.138:3000/api/location";
-const char* COMMAND_URL = "http://10.182.192.138:3000/api/device/band-001/command";
+// Production Cloud Server Endpoints (Render)
+const char* SERVER_URL  = "https://safety-system-yfxl.onrender.com/api/location";
+const char* COMMAND_URL = "https://safety-system-yfxl.onrender.com/api/device/band-001/command";
 
 // API Key (must match DEVICE_API_KEY on the server / .env)
 const char* API_KEY     = "dev_device_api_key_12345";
@@ -219,7 +219,7 @@ void postLocation(const char* event) {
 // ---------- COMMANDS / SOS ----------
 void startSOS() {
   sosActive = true;
-  sosStart = millis();
+  sosStart = millis();  
   ledBlink(3);
   postLocation("sos_start");                   // fastest path first
   smsAll("SOS! I need help. This is an emergency.");

@@ -8,6 +8,10 @@ export function getApiBaseUrl(): string {
   const custom = localStorage.getItem('custom_server_url');
   if (custom) return custom.trim().replace(/\/$/, '');
 
+  if ((import.meta as any).env?.VITE_API_URL) {
+    return ((import.meta as any).env.VITE_API_URL as string).trim().replace(/\/$/, '');
+  }
+
   // Vite development proxy
   if (window.location.port === '5173') {
     return 'http://localhost:3000';
@@ -20,7 +24,7 @@ export function getApiBaseUrl(): string {
     (window.location.hostname === 'localhost' && window.location.port === '');
 
   if (isNative) {
-    return 'http://10.182.192.138:3000';
+    return 'https://safety-system-yfxl.onrender.com';
   }
 
   return '';

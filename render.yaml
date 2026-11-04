@@ -20,7 +20,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: DEVICE_API_KEY
-        generateValue: true
+        value: "dev_device_api_key_12345"
       - key: ADMIN_EMAIL
         sync: false
       - key: ADMIN_PASSWORD
