@@ -256,7 +256,8 @@ describe('Server API & Hardware Contract Tests', () => {
         .get('/api/device/band-001/command')
         .set('x-api-key', DEVICE_KEY);
 
-      expect(pollRes.text).toBe(JSON.stringify({ command: 'sos' }));
+      expect(pollRes.body.command).toBe('sos');
+      expect(pollRes.body.victimName).toBe('Jane Doe');
 
       // User resolves SOS ("I am safe")
       const resolveRes = await request(app)

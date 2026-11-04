@@ -31,9 +31,12 @@ CREATE TABLE IF NOT EXISTS device_commands (
   id SERIAL PRIMARY KEY,
   device_id VARCHAR(100) NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
   command VARCHAR(50) NOT NULL, -- 'sos' | 'stop'
+  details TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   consumed_at TIMESTAMP WITH TIME ZONE
 );
+
+ALTER TABLE device_commands ADD COLUMN IF NOT EXISTS details TEXT;
 
 CREATE TABLE IF NOT EXISTS incidents (
   id SERIAL PRIMARY KEY,

@@ -136,26 +136,20 @@ deviceRouter.post('/location', async (req: Request, res: Response): Promise<void
   res.status(200).json({ ok: true });
 });
 
-// GET /api/device/:deviceId/command (Band polling every 5s)
-// MUST return EXACTLY ONE of: {"command":"sos"} | {"command":"stop"} | {"command":"none"}
-// Without any other fields or text containing those words
+// GET /api/device/:deviceId/command (Band polling every 3-5s)
 deviceRouter.get('/device/:deviceId/command', async (req: Request, res: Response): Promise<void> => {
   const { deviceId } = req.params;
 
-  const deviceRes = await query('SELECT device_id FROM devices WHERE device_id = $1', [deviceId]);
-  if (deviceRes.rows.length === 0) {
-    res.status(404).json({ error: 'Device not found' });
-    return;
-  }
+  // Auto-register device if not present
+  await query('INSERT INTO devices (device_id) VALUES ($1) ON CONFLICT DO NOTHING', [deviceId]);
 
   // Update last seen
   await query('UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE device_id = $1', [deviceId]);
 
-  const command = await consumeNextCommand(deviceId);
+  const commandObj = await consumeNextCommand(deviceId);
 
-  // Return exactly the expected JSON format
   res.setHeader('Content-Type', 'application/json');
-  res.status(200).send(JSON.stringify({ command }));
+  res.status(200).json(commandObj);
 });
 
 // GET /api/device/:deviceId/config (Band dynamically fetches victim profile & emergency contacts)

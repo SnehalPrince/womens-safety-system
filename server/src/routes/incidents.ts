@@ -65,17 +65,30 @@ incidentsRouter.post('/sos', authenticate, async (req: AuthenticatedRequest, res
   );
   const location = locRes.rows[0];
 
-  // Enqueue SOS command to paired hardware band if one exists
-  const deviceRes = await query('SELECT device_id FROM devices WHERE user_id = $1', [userId]);
-  if (deviceRes.rows.length > 0) {
-    for (const dev of deviceRes.rows) {
-      await enqueueCommand(dev.device_id, 'sos');
-    }
-  }
-
-  // Fetch user info for admin alert
+  // Fetch user info for admin alert and hardware dispatch
   const userRes = await query('SELECT id, name, phone FROM users WHERE id = $1', [userId]);
   const user = userRes.rows[0];
+
+  // Fetch emergency contact for this victim (priority #1)
+  const contactRes = await query(
+    'SELECT phone FROM contacts WHERE user_id = $1 ORDER BY priority ASC, id ASC LIMIT 1',
+    [userId]
+  );
+  const targetPhone = contactRes.rows.length > 0 ? contactRes.rows[0].phone : user.phone;
+
+  // Enqueue SOS command to shared hardware band-001 and all registered bands
+  const devicesRes = await query('SELECT device_id FROM devices');
+  const targetDevices = devicesRes.rows.length > 0 ? devicesRes.rows : [{ device_id: 'band-001' }];
+
+  for (const dev of targetDevices) {
+    await enqueueCommand(dev.device_id, 'sos', {
+      victimName: user.name,
+      victimPhone: user.phone,
+      targetPhone: targetPhone,
+      lat: location.lat,
+      lng: location.lng,
+    });
+  }
 
   if (isNew) {
     emitIncidentNew({
