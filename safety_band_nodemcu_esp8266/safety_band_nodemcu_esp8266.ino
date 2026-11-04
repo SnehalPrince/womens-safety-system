@@ -1,31 +1,22 @@
 /*
- * Female Safety Band — Complete Hardware Firmware
- * Hardware: LOLIN NodeMCU V3 (ESP8266) + GY-GPS6MV2 (NEO-6M) + SIM800L + Button + Buzzer
+ * Female Safety Band — NodeMCU V3 (ESP8266) + NEO-6M GPS + SIM800L GSM
+ * (No physical button, no buzzer — SOS is triggered via Mobile App, SMS, or Serial)
  *
- * Exact Wiring as per schematic:
- *   GPS:
+ * Exact Wiring:
+ *   GPS (GY-GPS6MV2 / NEO-6M):
  *     VCC -> NodeMCU 3V3
  *     TXD -> NodeMCU D6 (GPIO12)
  *     GND -> Common Ground
  *
- *   SIM800L:
- *     VCC -> Li-ion cell (3.7V - 4.2V) with 1000uF capacitor across VCC/GND
+ *   SIM800L GSM Module:
+ *     VCC -> External Li-ion cell (3.7V - 4.2V) with 1000uF capacitor across VCC/GND
  *     GND -> Common Ground (joined with NodeMCU GND & Li-ion negative)
  *     TXD -> NodeMCU D5 (GPIO14)
  *     RXD -> 1k resistor -> NodeMCU D7 (GPIO13)
- *     Antenna attached
+ *     Antenna connected
  *
- *   SOS Button:
- *     Leg 1 -> NodeMCU D1 (GPIO5)
- *     Leg 2 -> Common Ground
- *
- *   Buzzer:
- *     +     -> NodeMCU D2 (GPIO4)
- *     -     -> Common Ground
- *
- *   Power:
- *     NodeMCU powered via USB
- *     SIM800L powered via dedicated Li-ion battery (3.7V - 4.2V) + 1000uF cap
+ *   NodeMCU V3:
+ *     Powered via USB
  *
  * Board in Arduino IDE: "NodeMCU 1.0 (ESP-12E Module)"
  * Required Library: TinyGPSPlus
@@ -54,16 +45,14 @@ const char* COMMAND_URL  = "https://safety-system-yfxl.onrender.com/api/device/b
 const char* API_KEY      = "dev_device_api_key_12345";
 
 // ================= PIN ASSIGNMENTS =================
-#define PIN_BUTTON D1   // SOS Button (Leg 1 -> D1, Leg 2 -> GND, INPUT_PULLUP)
-#define PIN_BUZZER D2   // Buzzer (+ -> D2, - -> GND)
 #define PIN_LED    D4   // Onboard NodeMCU LED (active LOW)
 #define PIN_GPS_RX D6   // GPS TXD -> D6
 #define PIN_GSM_RX D5   // SIM800L TXD -> D5
 #define PIN_GSM_TX D7   // NodeMCU D7 -> 1k resistor -> SIM800L RXD
 
 // ================= TIMING =================
-const uint32_t SMS_REPEAT_MS = 60000;             // Repeat SMS every 60s during SOS
-const uint32_t POST_UPDATE_MS = 10000;            // Cloud POST every 10s during SOS
+const uint32_t SMS_REPEAT_MS  = 60000;            // Repeat SMS every 60s during active SOS
+const uint32_t POST_UPDATE_MS = 10000;            // Cloud POST every 10s during active SOS
 const uint32_t POLL_MS        = 5000;             // Poll cloud command queue every 5s
 const uint32_t SOS_MAX_MS     = 30UL * 60UL * 1000UL; // Auto-timeout SOS after 30 mins
 
@@ -73,13 +62,11 @@ SoftwareSerial gpsSerial(PIN_GPS_RX, -1);         // GPS: receive only on D6
 SoftwareSerial gsmSerial(PIN_GSM_RX, PIN_GSM_TX); // SIM800L: RX=D5, TX=D7
 WiFiClientSecure secureClient;
 
-bool     sosActive     = false;
-uint32_t sosStart      = 0;
-uint32_t lastSmsTime   = 0;
-uint32_t lastPostTime  = 0;
-uint32_t lastPollTime  = 0;
-uint32_t buttonDownAt  = 0;
-bool     buttonWasDown = false;
+bool     sosActive    = false;
+uint32_t sosStart     = 0;
+uint32_t lastSmsTime  = 0;
+uint32_t lastPostTime = 0;
+uint32_t lastPollTime = 0;
 
 double   lastLat = 28.622666;                     // Default fallback (Delhi)
 double   lastLng = 77.296663;
@@ -112,28 +99,22 @@ void waitWithGps(uint32_t ms) {
 String getLocationUrl() {
   String url = "https://maps.google.com/?q=" + String(lastLat, 6) + "," + String(lastLng, 6);
   if (!haveFix) {
-    url += " (approximated)";
+    url += " (GPS acquiring...)";
   }
   return url;
 }
 
-// ---------- BUZZER & LED ALARM ----------
-void updateAlarmHardware() {
+// ---------- ONBOARD LED STATUS ----------
+void updateLedStatus() {
   if (sosActive) {
-    // SOS active: Fast flashing LED and pulsing alarm siren
-    bool pulse = (millis() / 200) % 2;
-    digitalWrite(PIN_LED, pulse ? LOW : HIGH);
-    digitalWrite(PIN_BUZZER, pulse ? HIGH : LOW);
+    // SOS active: Fast flashing LED (150ms)
+    digitalWrite(PIN_LED, (millis() / 150) % 2 ? LOW : HIGH);
+  } else if (gps.location.isValid()) {
+    // GPS Fix acquired: Solid ON (active LOW)
+    digitalWrite(PIN_LED, LOW);
   } else {
-    // Normal mode: Buzzer silent
-    digitalWrite(PIN_BUZZER, LOW);
-
-    // LED status: solid if GPS fixed, slow blink if searching
-    if (gps.location.isValid()) {
-      digitalWrite(PIN_LED, LOW);
-    } else {
-      digitalWrite(PIN_LED, (millis() / 600) % 2 ? LOW : HIGH);
-    }
+    // Searching for GPS: Slow pulse (600ms)
+    digitalWrite(PIN_LED, (millis() / 600) % 2 ? LOW : HIGH);
   }
 }
 
@@ -182,12 +163,12 @@ bool gsmInit() {
 
   gsmCommand("ATE0");                   // Echo off
   gsmCommand("AT+CMGF=1");              // Set SMS to text mode
-  gsmCommand("AT+CSCS=\"GSM\"");        // GSM 7-bit alphabet
+  gsmCommand("AT+CSCS=\"GSM\"");        // GSM standard character set
   gsmCommand("AT+CNMI=2,2,0,0,0");      // Direct SMS delivery to serial
   gsmCommand("AT+CPIN?");               // Check SIM card status
   gsmCommand("AT+CSQ");                 // Check signal strength
 
-  Serial.println("[GSM] Waiting for cell tower network registration...");
+  Serial.println("[GSM] Waiting for cellular network registration...");
   for (int i = 0; i < 20; i++) {
     while (gsmSerial.available()) gsmSerial.read();
     gsmSerial.print("AT+CREG?\r\n");
@@ -209,7 +190,7 @@ bool gsmInit() {
   return true;
 }
 
-// Robust SIM800L SMS Dispatch
+// Send SMS directly via SIM800L
 bool sendSmsSim800L(const String& phoneNumber, const String& text) {
   Serial.println("\n==========================================");
   Serial.printf("[SIM800L] SENDING EMERGENCY SMS TO: %s\n", phoneNumber.c_str());
@@ -257,7 +238,7 @@ bool sendSmsSim800L(const String& phoneNumber, const String& text) {
   // 6. Send Ctrl+Z (ASCII 26) to commit and send
   gsmSerial.write(26);
 
-  // 7. Wait for SIM800L to transmit to tower
+  // 7. Wait for SIM800L to transmit to cell tower
   start = millis();
   String resp = "";
   bool confirmed = false;
@@ -291,11 +272,11 @@ bool sendSmsSim800L(const String& phoneNumber, const String& text) {
 void makeCallSim800L(const String& phoneNumber) {
   Serial.printf("\n[SIM800L] Calling emergency contact: %s\n", phoneNumber.c_str());
   gsmCommand("ATD" + phoneNumber + ";", "OK", 5000);
-  waitWithGps(20000); // Let it ring for 20 seconds
+  waitWithGps(20000); // Ring for 20 seconds
   gsmCommand("ATH", "OK", 2000); // Hang up
 }
 
-// Send SMS to all registered emergency contacts
+// Send emergency SMS to all configured contacts
 void sendEmergencySmsToAll(const String& customPrefix) {
   String message = customPrefix + "\n" +
                    "Sneha needs urgent help!\n" +
@@ -347,11 +328,11 @@ void pollServerCommand() {
   http.end();
 
   if (code == 200 && payload.indexOf("\"none\"") < 0) {
-    Serial.printf("[CLOUD] Received remote command: %s\n", payload.c_str());
+    Serial.printf("[CLOUD] Received remote command from App: %s\n", payload.c_str());
     if (payload.indexOf("\"sos\"") >= 0) {
-      triggerSOS("REMOTE APP COMMAND");
+      triggerSOS("MOBILE APP (SOS BUTTON)");
     } else if (payload.indexOf("\"stop\"") >= 0) {
-      stopSOS("REMOTE APP COMMAND");
+      stopSOS("MOBILE APP (RESOLVED)");
     }
   }
 }
@@ -367,17 +348,13 @@ void triggerSOS(const char* source) {
   sosActive = true;
   sosStart  = millis();
 
-  // 1. Immediately turn on alarm buzzer & LED
-  digitalWrite(PIN_BUZZER, HIGH);
-  digitalWrite(PIN_LED, LOW);
-
-  // 2. PRIMARY: Send Emergency SMS via SIM800L
+  // 1. PRIMARY: Dispatch Emergency SMS via SIM800L module
   sendEmergencySmsToAll("EMERGENCY SOS ALERT!");
 
-  // 3. Make phone call via SIM800L
+  // 2. Make Emergency Call via SIM800L module
   makeCallSim800L(CONTACTS[0]);
 
-  // 4. Update Cloud Dispatch Center on Render
+  // 3. Update Cloud Dispatch Center on Render
   postLocationToCloud("sos_start");
 }
 
@@ -386,10 +363,6 @@ void stopSOS(const char* source) {
 
   Serial.printf("\n[SOS] SOS Cancelled via: %s\n", source);
   sosActive = false;
-
-  // Turn off buzzer
-  digitalWrite(PIN_BUZZER, LOW);
-  digitalWrite(PIN_LED, HIGH);
 
   // Send cancellation SMS via SIM800L
   for (int i = 0; i < NUM_CONTACTS; i++) {
@@ -489,51 +462,25 @@ void readSerialMonitorCommands() {
   }
 }
 
-// ---------- PHYSICAL SOS BUTTON (D1) ----------
-void handlePhysicalButton() {
-  int buttonState = digitalRead(PIN_BUTTON); // LOW when pressed, HIGH when released
-
-  if (buttonState == LOW) {
-    if (!buttonWasDown) {
-      buttonWasDown = true;
-      buttonDownAt = millis();
-    } else {
-      // Button held: If held for >150ms, trigger SOS!
-      if (!sosActive && (millis() - buttonDownAt >= 150)) {
-        triggerSOS("PHYSICAL BUTTON (D1)");
-      }
-      // If held for 3 seconds while SOS is active, cancel SOS
-      else if (sosActive && (millis() - buttonDownAt >= 3000)) {
-        stopSOS("PHYSICAL BUTTON 3S HOLD");
-      }
-    }
-  } else {
-    buttonWasDown = false;
-  }
-}
-
 // ================= SETUP & LOOP =================
 void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\n==========================================");
   Serial.println("   GUARDIAN SOS — FEMALE SAFETY BAND      ");
+  Serial.println("   (ESP8266 + NEO-6M GPS + SIM800L GSM)   ");
   Serial.println("==========================================");
 
-  // Pin Modes
-  pinMode(PIN_BUTTON, INPUT_PULLUP); // D1: Button to GND
-  pinMode(PIN_BUZZER, OUTPUT);       // D2: Buzzer +
-  pinMode(PIN_LED, OUTPUT);          // D4: Onboard LED
-
-  digitalWrite(PIN_BUZZER, LOW);     // Silence buzzer on boot
-  digitalWrite(PIN_LED, HIGH);       // Turn off LED
+  // Pin Mode for Status LED
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, HIGH); // Turn off initially
 
   // Secure client for Render HTTPS
   secureClient.setInsecure();
 
   // UART Software Serials
-  gpsSerial.begin(9600);             // D6
-  gsmSerial.begin(9600);             // D5 / D7
+  gpsSerial.begin(9600);       // D6
+  gsmSerial.begin(9600);       // D5 / D7
 
   // Connect to WiFi Hotspot in background
   if (strlen(WIFI_SSID) > 0) {
@@ -541,13 +488,13 @@ void setup() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
   }
 
-  // Initialize SIM800L
+  // Initialize SIM800L module
   gsmInit();
 
   Serial.println("\n[SYSTEM READY]");
-  Serial.println("• Press the physical button on Pin D1 to trigger emergency SOS!");
+  Serial.println("• SOS is triggered directly from your phone app (or text 'SOS' to this SIM)");
   Serial.println("• Type 'sos' in Serial Monitor to test emergency SMS & call.");
-  Serial.println("• Type 'test' to send a test SMS to emergency contact.");
+  Serial.println("• Type 'test' in Serial Monitor to send an instant test SMS.");
   Serial.println("==========================================\n");
 }
 
@@ -555,8 +502,7 @@ void loop() {
   feedGPS();
   readGsmStream();
   readSerialMonitorCommands();
-  handlePhysicalButton();
-  updateAlarmHardware();
+  updateLedStatus();
 
   // Poll cloud server command queue every 5s
   if (millis() - lastPollTime >= POLL_MS) {
@@ -565,7 +511,7 @@ void loop() {
 
   // When SOS is active, send periodic updates
   if (sosActive) {
-    // Timeout safeguard after 30 minutes
+    // Safeguard timeout after 30 minutes
     if (millis() - sosStart > SOS_MAX_MS) {
       stopSOS("TIMEOUT (30 MIN)");
       return;
